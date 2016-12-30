@@ -469,7 +469,9 @@ prompt_pure_setup() {
 	fi
 
 	# prompt turns red if the previous command didn't exit with 0
-	PROMPT+="%(?.%F{3}.%F{red}💩  )%? ${PURE_PROMPT_SYMBOL:-💀 }%f "
+	#statements
+	# PROMPT="%(?.%F{3}.%F{red}💩  )%? ${PURE_PROMPT_SYMBOL:-💀 }%f "
+	PROMPT+="%(?.%F{3}${PURE_PROMPT_SYMBOL:-💀 }%f.%F{red} %? ${PURE_PROMPT_SYMBOL:-💥 }%f) "
 }
 
 prompt_pure_setup "$@"
