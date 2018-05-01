@@ -46,15 +46,22 @@ prompt_pure_human_time_to_var() {
 prompt_pure_check_cmd_exec_time() {
 	integer elapsed
 	(( elapsed = EPOCHSECONDS - ${prompt_pure_cmd_timestamp:-$EPOCHSECONDS} ))
-	prompt_pure_cmd_exec_time=
-	(( elapsed > ${PURE_CMD_MAX_EXEC_TIME:=5} )) && {
+	typeset -g prompt_pure_cmd_exec_time=
+	(( elapsed > ${PURE_CMD_MAX_EXEC_TIME:-5} )) && {
 		prompt_pure_human_time_to_var $elapsed "prompt_pure_cmd_exec_time"
 	}
 }
 
 prompt_pure_set_title() {
+	setopt localoptions noshwordsplit
+
 	# emacs terminal does not support settings the title
 	(( ${+EMACS} )) && return
+
+	case $TTY in
+		# Don't set title over serial console.
+		/dev/ttyS[0-9]*) return;;
+	esac
 
 	# tell the terminal we are setting the title
 	print -n '\e]0;'
@@ -73,6 +80,7 @@ prompt_pure_set_title() {
 prompt_pure_preexec() {
 	if [[ -n $prompt_pure_git_fetch_pattern ]]; then
 		# detect when git is performing pull/fetch (including git aliases).
+		local -H MATCH MBEGIN MEND match mbegin mend
 		if [[ $2 =~ (git|hub)\ (.*\ )?($prompt_pure_git_fetch_pattern)(\ .*)?$ ]]; then
 			# we must flush the async jobs to cancel our git fetch in order
 			# to avoid conflicts with the user issued pull / fetch.
@@ -80,10 +88,15 @@ prompt_pure_preexec() {
 		fi
 	fi
 
-	prompt_pure_cmd_timestamp=$EPOCHSECONDS
+	typeset -g prompt_pure_cmd_timestamp=$EPOCHSECONDS
 
 	# shows the current dir and executed command in the title while a process is active
 	prompt_pure_set_title 'ignore-escape' "$PWD:t: $2"
+
+	# Disallow python virtualenv from updating the prompt, set it to 12 if
+	# untouched by the user to indicate that Pure modified it. Here we use
+	# magic number 12, same as in psvar.
+	export VIRTUAL_ENV_DISABLE_PROMPT=${VIRTUAL_ENV_DISABLE_PROMPT:-12}
 }
 
 # string length ignoring ansi escapes
@@ -98,10 +111,6 @@ prompt_pure_string_length_to_var() {
 
 prompt_pure_preprompt_render() {
 	setopt localoptions noshwordsplit
-
-	# Check that no command is currently running, the preprompt will otherwise
-	# be rendered in the wrong place.
-	[[ -n ${prompt_pure_cmd_timestamp+x} ]] && [[ $1 != precmd ]] && return
 
 	# Set color for git branch/dirty status, change color if dirty checking has
 	# been delayed.
@@ -125,24 +134,22 @@ prompt_pure_preprompt_render() {
 	fi
 
 	# Username and machine, if applicable.
-	[[ -n $prompt_pure_username ]] && preprompt_parts+=('$prompt_pure_username')
+	[[ -n $prompt_pure_state[username] ]] && preprompt_parts+=('${prompt_pure_state[username]}')
 	# Execution time.
 	[[ -n $prompt_pure_cmd_exec_time ]] && preprompt_parts+=('%F{yellow}${prompt_pure_cmd_exec_time}%f')
 
 	local cleaned_ps1=$PROMPT
-	local -H MATCH
+	local -H MATCH MBEGIN MEND
 	if [[ $PROMPT = *$prompt_newline* ]]; then
-		# When the prompt contains newlines, we keep everything before the first
-		# and after the last newline, leaving us with everything except the
-		# preprompt. This is needed because some software prefixes the prompt
-		# (e.g. virtualenv).
-		cleaned_ps1=${PROMPT%%${prompt_newline}*}${PROMPT##*${prompt_newline}}
+		# Remove everything from the prompt until the newline. This
+		# removes the preprompt and only the original PROMPT remains.
+		cleaned_ps1=${PROMPT##*${prompt_newline}}
 	fi
+	unset MATCH MBEGIN MEND
 
 	# Construct the new prompt with a clean preprompt.
 	local -ah ps1
 	ps1=(
-		$prompt_newline           # Initial newline, for spaciousness.
 		${(j. .)preprompt_parts}  # Join parts, space separated.
 		$prompt_newline           # Separate preprompt and prompt.
 		$cleaned_ps1
@@ -154,21 +161,21 @@ prompt_pure_preprompt_render() {
 	local expanded_prompt
 	expanded_prompt="${(S%%)PROMPT}"
 
-	if [[ $1 != precmd ]] && [[ $prompt_pure_last_prompt != $expanded_prompt ]]; then
+	if [[ $1 == precmd ]]; then
+		# Initial newline, for spaciousness.
+		print
+	elif [[ $prompt_pure_last_prompt != $expanded_prompt ]]; then
 		# Redraw the prompt.
 		zle && zle .reset-prompt
 	fi
 
-	prompt_pure_last_prompt=$expanded_prompt
+	typeset -g prompt_pure_last_prompt=$expanded_prompt
 }
 
 prompt_pure_precmd() {
 	# check exec time and store it in a variable
 	prompt_pure_check_cmd_exec_time
-
-	# by making sure that prompt_pure_cmd_timestamp is defined here the async functions are prevented from interfering
-	# with the initial preprompt rendering
-	prompt_pure_cmd_timestamp=
+	unset prompt_pure_cmd_timestamp
 
 	# shows the full path in the title
 	prompt_pure_set_title 'expand-prompt' '%~'
@@ -176,15 +183,18 @@ prompt_pure_precmd() {
 	# preform async git dirty check and fetch
 	prompt_pure_async_tasks
 
-	# store name of virtualenv in psvar if activated
+	# Check if we should display the virtual env, we use a sufficiently high
+	# index of psvar (12) here to avoid collisions with user defined entries.
 	psvar[12]=
-	[[ -n $VIRTUAL_ENV ]] && psvar[12]="${VIRTUAL_ENV:t}"
+	# When VIRTUAL_ENV_DISABLE_PROMPT is empty, it was unset by the user and
+	# Pure should take back control.
+	if [[ -n $VIRTUAL_ENV ]] && [[ -z $VIRTUAL_ENV_DISABLE_PROMPT || $VIRTUAL_ENV_DISABLE_PROMPT = 12 ]]; then
+		psvar[12]="${VIRTUAL_ENV:t}"
+		export VIRTUAL_ENV_DISABLE_PROMPT=12
+	fi
 
 	# print the preprompt
 	prompt_pure_preprompt_render "precmd"
-
-	# remove the prompt_pure_cmd_timestamp, indicating that precmd has completed
-	unset prompt_pure_cmd_timestamp
 }
 
 prompt_pure_async_git_aliases() {
@@ -259,7 +269,7 @@ prompt_pure_async_git_fetch() {
 	# set GIT_TERMINAL_PROMPT=0 to disable auth prompting for git fetch (git 2.3+)
 	export GIT_TERMINAL_PROMPT=0
 	# set ssh BachMode to disable all interactive ssh password prompting
-	export GIT_SSH_COMMAND=${GIT_SSH_COMMAND:-"ssh -o BatchMode=yes"}
+	export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-"ssh"} -o BatchMode=yes"
 
 	command git -c gc.auto=0 fetch &>/dev/null || return 99
 
@@ -280,12 +290,12 @@ prompt_pure_async_tasks() {
 	((!${prompt_pure_async_init:-0})) && {
 		async_start_worker "prompt_pure" -u -n
 		async_register_callback "prompt_pure" prompt_pure_async_callback
-		prompt_pure_async_init=1
+		typeset -g prompt_pure_async_init=1
 	}
 
 	typeset -gA prompt_pure_vcs_info
 
-	local -H MATCH
+	local -H MATCH MBEGIN MEND
 	if ! [[ $PWD = ${prompt_pure_vcs_info[pwd]}* ]]; then
 		# stop any running async jobs
 		async_flush_jobs "prompt_pure"
@@ -298,7 +308,7 @@ prompt_pure_async_tasks() {
 		prompt_pure_vcs_info[branch]=
 		prompt_pure_vcs_info[top]=
 	fi
-	unset MATCH
+	unset MATCH MBEGIN MEND
 
 	async_job "prompt_pure" prompt_pure_async_vcs_info $PWD
 
@@ -314,7 +324,7 @@ prompt_pure_async_refresh() {
 	if [[ -z $prompt_pure_git_fetch_pattern ]]; then
 		# we set the pattern here to avoid redoing the pattern check until the
 		# working three has changed. pull and fetch are always valid patterns.
-		prompt_pure_git_fetch_pattern="pull|fetch"
+		typeset -g prompt_pure_git_fetch_pattern="pull|fetch"
 		async_job "prompt_pure" prompt_pure_async_git_aliases $working_tree
 	fi
 
@@ -348,7 +358,8 @@ prompt_pure_check_git_arrows() {
 
 prompt_pure_async_callback() {
 	setopt localoptions noshwordsplit
-	local job=$1 code=$2 output=$3 exec_time=$4
+	local job=$1 code=$2 output=$3 exec_time=$4 next_pending=$6
+	local do_render=0
 
 	case $job in
 		prompt_pure_async_vcs_info)
@@ -357,7 +368,7 @@ prompt_pure_async_callback() {
 
 			# parse output (z) and unquote as array (Q@)
 			info=("${(Q@)${(z)output}}")
-			local -H MATCH
+			local -H MATCH MBEGIN MEND
 			# check if git toplevel has changed
 			if [[ $info[top] = $prompt_pure_vcs_info[top] ]]; then
 				# if stored pwd is part of $PWD, $PWD is shorter and likelier
@@ -369,7 +380,7 @@ prompt_pure_async_callback() {
 				# store $PWD to detect if we (maybe) left the git path
 				prompt_pure_vcs_info[pwd]=$PWD
 			fi
-			unset MATCH
+			unset MATCH MBEGIN MEND
 
 			# update has a git toplevel set which means we just entered a new
 			# git directory, run the async refresh tasks
@@ -379,7 +390,7 @@ prompt_pure_async_callback() {
 			prompt_pure_vcs_info[branch]=$info[branch]
 			prompt_pure_vcs_info[top]=$info[top]
 
-			prompt_pure_preprompt_render
+			do_render=1
 			;;
 		prompt_pure_async_git_aliases)
 			if [[ -n $output ]]; then
@@ -390,12 +401,12 @@ prompt_pure_async_callback() {
 		prompt_pure_async_git_dirty)
 			local prev_dirty=$prompt_pure_git_dirty
 			if (( code == 0 )); then
-				prompt_pure_git_dirty=
+				unset prompt_pure_git_dirty
 			else
-				prompt_pure_git_dirty="*"
+				typeset -g prompt_pure_git_dirty="*"
 			fi
 
-			[[ $prev_dirty != $prompt_pure_git_dirty ]] && prompt_pure_preprompt_render
+			[[ $prev_dirty != $prompt_pure_git_dirty ]] && do_render=1
 
 			# When prompt_pure_git_last_dirty_check_timestamp is set, the git info is displayed in a different color.
 			# To distinguish between a "fresh" and a "cached" result, the preprompt is rendered before setting this
@@ -409,8 +420,8 @@ prompt_pure_async_callback() {
 				local REPLY
 				prompt_pure_check_git_arrows ${(ps:\t:)output}
 				if [[ $prompt_pure_git_arrows != $REPLY ]]; then
-					prompt_pure_git_arrows=$REPLY
-					prompt_pure_preprompt_render
+					typeset -g prompt_pure_git_arrows=$REPLY
+					do_render=1
 				fi
 			elif (( code != 99 )); then
 				# Unless the exit code is 99, prompt_pure_async_git_arrows
@@ -418,25 +429,33 @@ prompt_pure_async_callback() {
 				# upstream configured.
 				if [[ -n $prompt_pure_git_arrows ]]; then
 					unset prompt_pure_git_arrows
-					prompt_pure_preprompt_render
+					do_render=1
 				fi
 			fi
 			;;
 	esac
+
+	if (( next_pending )); then
+		(( do_render )) && typeset -g prompt_pure_async_render_requested=1
+		return
+	fi
+
+	[[ ${prompt_pure_async_render_requested:-$do_render} = 1 ]] && prompt_pure_preprompt_render
+	unset prompt_pure_async_render_requested
 }
 
 prompt_pure_setup() {
 	# Prevent percentage showing up if output doesn't end with a newline.
 	export PROMPT_EOL_MARK=''
 
-	# disallow python virtualenvs from updating the prompt
-	export VIRTUAL_ENV_DISABLE_PROMPT=1
-
 	prompt_opts=(subst percent)
 
 	# borrowed from promptinit, sets the prompt options in case pure was not
 	# initialized via promptinit.
 	setopt noprompt{bang,cr,percent,subst} "prompt${^prompt_opts[@]}"
+
+	# Turn on local options after setting the global prompt options above.
+	setopt localoptions noshwordsplit
 
 	if [[ -z $prompt_newline ]]; then
 		# This variable needs to be set, usually set by promptinit.
@@ -454,11 +473,25 @@ prompt_pure_setup() {
 	add-zsh-hook precmd prompt_pure_precmd
 	add-zsh-hook preexec prompt_pure_preexec
 
+	local ssh_connection=$SSH_CONNECTION
+	local username
+	if [[ -z $ssh_connection ]] && (( $+commands[who] )); then
+		# When changing user on a remote system, the $SSH_CONNECTION
+		# environment variable can be lost, attempt detection via who.
+		if who am i | grep -q '(.*)$' &>/dev/null; then
+			ssh_connection=true
+		fi
+	fi
+
 	# show username@host if logged in through SSH
-	[[ "$SSH_CONNECTION" != '' ]] && prompt_pure_username='%F{242}%n@%m%f'
+	[[ -n $ssh_connection ]] && username='%F{242}%n@%m%f'
 
 	# show username@host if root, with username in white
-	[[ $UID -eq 0 ]] && prompt_pure_username='%F{white}%n%f%F{242}@%m%f'
+	[[ $UID -eq 0 ]] && username='%F{white}%n%f%F{242}@%m%f'
+
+	typeset -gA prompt_pure_state=(
+		username "$username"
+	)
 
 	# if a virtualenv is activated, display it in grey
 	PROMPT='%(12V.%F{242}%12v%f .)'
