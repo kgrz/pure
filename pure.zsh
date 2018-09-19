@@ -478,7 +478,7 @@ prompt_pure_async_callback() {
 }
 
 prompt_pure_reset_prompt_symbol() {
-	prompt_pure_state[prompt]=${PURE_PROMPT_SYMBOL:-❯}
+	prompt_pure_state[prompt]=${PURE_PROMPT_SYMBOL:-💀}
 }
 
 prompt_pure_update_vim_prompt_widget() {
@@ -538,7 +538,7 @@ prompt_pure_state_setup() {
 	typeset -gA prompt_pure_state
 	prompt_pure_state=(
 		username "$username"
-		prompt	 "${PURE_PROMPT_SYMBOL:-❯}"
+		prompt	 "${PURE_PROMPT_SYMBOL:-💀}"
 	)
 }
 
